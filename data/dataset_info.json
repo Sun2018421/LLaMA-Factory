@@ -730,5 +730,12 @@
       "prompt": "content"
     },
     "folder": "python"
+  },
+  "math_cot": {
+  "file_name": "train_qwen_cot.jsonl",
+  "columns": {
+    "prompt": "instruction",
+    "response": "output"
   }
+}
 }
