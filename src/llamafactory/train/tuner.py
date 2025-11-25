@@ -52,206 +52,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-def generate_full_report(input_ids, scores, tokenizer, step=0, save_dir="analysis_reports"):
-    """
-    功能：
-    1. 画一张超宽的折线图 (2000个点也能看清)
-    2. 生成一个交互式 HTML 网页，可以直接阅读带颜色的文本
-    """
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
 
-    # 预处理：转 List
-    if isinstance(input_ids, torch.Tensor):
-        input_ids = input_ids.cpu().tolist()
-    if isinstance(scores, torch.Tensor):
-        scores = scores.cpu().numpy()
-    
-    seq_len = len(input_ids)
-    
-    # ==========================================
-    # 1. 宏观视角：超宽折线图 (The Panorama)
-    # ==========================================
-    # 宽度设为 30 英寸，确保 2000 个点不会挤在一起
-    plt.figure(figsize=(30, 6)) 
-    
-    plt.plot(scores, color='#8e44ad', linewidth=1.5, alpha=0.9, label='Importance (Leverage Score)')
-    plt.fill_between(range(seq_len), scores, color='#8e44ad', alpha=0.1) # 填充颜色，更有质感
-    
-    # 标注均值线
-    mean_score = np.mean(scores)
-    plt.axhline(y=mean_score, color='red', linestyle='--', alpha=0.5, label=f'Average: {mean_score:.4f}')
-    
-    plt.title(f"Step {step} - Full Token Importance Panorama (Length: {seq_len})", fontsize=16)
-    plt.xlabel("Token Position", fontsize=12)
-    plt.ylabel("Leverage Score", fontsize=12)
-    plt.legend(loc='upper right')
-    plt.xlim(0, seq_len)
-    plt.grid(True, alpha=0.2)
-    
-    # 保存图片
-    img_path = os.path.join(save_dir, f"step_{step}_panorama.png")
-    plt.tight_layout()
-    plt.savefig(img_path, dpi=150) # 150 dpi 保证清晰度
-    plt.close()
-    print(f"[1/2] 全景折线图已保存: {img_path}")
-
-    # ==========================================
-    # 微观视角：交互式 HTML 热力图 (The Heatmap)
-    # ==========================================
-    
-    # 归一化分数 (Log Scale 增强对比度)
-    # 加上 1e-10 避免 log(0)
-    log_scores = np.log(scores + 1e-10)
-    norm_scores = (log_scores - np.min(log_scores)) / (np.max(log_scores) - np.min(log_scores))
-    
-    # 准备 HTML 头部
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>Token Attribution Analysis - Step {step}</title>
-        <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; padding: 20px; background-color: #f9f9f9; }}
-            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; box-shadow: 0 0 10px rgba(0,0,0,0.1); border-radius: 8px; }}
-            h2 {{ color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
-            .token-box {{ 
-                display: inline-block; 
-                padding: 2px 4px; 
-                margin: 0 1px; 
-                border-radius: 4px; 
-                transition: all 0.2s;
-                cursor: default;
-                white-space: pre-wrap; /* 【关键修改】保留原始的换行符和空格 */
-                vertical-align: bottom; /* 保持对齐美观 */
-            }}
-            .token-box:hover {{ 
-                transform: scale(1.1); 
-                box-shadow: 0 2px 5px rgba(0,0,0,0.2); 
-                z-index: 10;
-                position: relative;
-                border: 1px solid #333;
-            }}
-            .legend {{ margin-bottom: 20px; padding: 10px; background: #eee; border-radius: 4px; font-size: 0.9em; }}
-            .stat-box {{ float: right; color: #666; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h2>Step {step} - Token Importance Heatmap</h2>
-            <div class="legend">
-                <span class="stat-box">Total Tokens: {seq_len}</span>
-                <strong>Color Scale:</strong> 
-                <span style="background-color: #fff0f0; padding: 2px 5px;">Low Info (Waste)</span> &rarr; 
-                <span style="background-color: #ffcccc; padding: 2px 5px;">Medium</span> &rarr; 
-                <span style="background-color: #ff0000; color: white; padding: 2px 5px;">High Info (Key)</span>
-                <br>
-                <small>* Hover over words to see raw leverage scores.</small>
-            </div>
-            <div style="font-size: 16px; word-wrap: break-word;">
-    """
-
-    # 逐个生成 Token 的 HTML
-    cmap = plt.get_cmap('Reds') # 使用红色系
-    
-    for i, (token_id, score, raw_score) in enumerate(zip(input_ids, norm_scores, scores)):
-        token_text = tokenizer.decode([token_id])
-        if "\ufffd" in token_text:
-        # 如果解码失败，说明这是个“半截”字符
-        # 我们改用 convert_ids_to_tokens 获取原始字节表示
-            raw_token = tokenizer.convert_ids_to_tokens([token_id])[0]
-        
-            # Qwen 的 raw_token 通常是 bytes 类型，转成字符串显示
-            if isinstance(raw_token, bytes):
-                # 显示为 <0xE2> 这种格式，既专业又不会乱码
-                display_text = f"&lt;0x{raw_token.hex().upper()}&gt;"
-            else:
-                # 如果不是 bytes，就保留原样或做简单转义
-                display_text = str(raw_token).replace('<', '&lt;').replace('>', '&gt;')
-        else:
-            # 如果解码正常，就用正常的文本
-            display_text = token_text.replace('<', '&lt;').replace('>', '&gt;')
-        
-        # 获取颜色 (分数越低越白，越高越红)
-        # 我们可以设置一个阈值，如果分数极低直接全白，减少视觉干扰
-        if raw_score < np.mean(scores) * 0.5:
-            color_hex = "#ffffff" # 纯白
-            text_color = "#ccc"   # 浅灰字
-        else:
-            rgba = cmap(score) # 0-1 映射到颜色
-            color_hex = mcolors.to_hex(rgba)
-            text_color = "#000" if score < 0.7 else "#fff" # 深背景用白字
-
-        html_content += f"""
-    <span class="token-box" 
-            style="background-color: {color_hex}; color: {text_color};" 
-            title="idx: {i} | token: {repr(token_text)} | score: {raw_score:.6f}">{display_text}</span>"""
-
-    html_content += """
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    # 保存 HTML
-    html_path = os.path.join(save_dir, f"step_{step}_heatmap.html")
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    print(f"[2/2] 交互式网页已保存: {html_path}")
-    print(f"请使用浏览器打开 {html_path} 进行观察。")
-
-# =================使用示例=================
-# 在你的主循环里这样调用：
-# generate_full_report(current_input_ids, token_importance_scores, tokenizer, step=step)
-
-def get_color_hex(score, cmap_name='Reds'):
-    """将归一化后的分数转换为 HTML 颜色代码"""
-    cmap = plt.get_cmap(cmap_name)
-    rgba = cmap(score)
-    return mcolors.to_hex(rgba)
-
-def create_colored_visualization(input_ids, scores, tokenizer):
-    """生成带有颜色高亮的 HTML 字符串"""
-    # 1. Log 归一化 (关键优化：让低分区域的层次更明显)
-    # 加 1e-10 防止 log(0)
-    log_scores = np.log(scores + 1e-10)
-    min_val = np.min(log_scores)
-    max_val = np.max(log_scores)
-    
-    # 归一化到 0-1
-    if max_val - min_val == 0:
-        norm_scores = np.zeros_like(scores)
-    else:
-        norm_scores = (log_scores - min_val) / (max_val - min_val)
-
-    html_parts = []
-    plain_text_parts = []
-
-    # 转回 list 方便遍历
-    if isinstance(input_ids, torch.Tensor):
-        input_ids = input_ids.cpu().tolist()
-        
-    for token_id, score, raw_score in zip(input_ids, norm_scores, scores):
-        token_text = tokenizer.decode([token_id])
-        
-        # 转义 HTML 特殊字符
-        safe_text = token_text.replace('<', '&lt;').replace('>', '&gt;')
-        
-        # 获取颜色
-        color_hex = get_color_hex(score)
-        
-        # 构造 span 标签，title 里放原始分数，鼠标悬停可以看到
-        span = f'<span style="background-color: {color_hex}; padding: 0 1px; border-radius: 2px;" title="Raw Score: {raw_score:.4f}"> {safe_text} </span>'
-        
-        html_parts.append(span)
-        plain_text_parts.append(token_text)
-
-    return "".join(html_parts), "".join(plain_text_parts)
 
 def run_attribution(model_args, data_args, training_args, finetuning_args, callbacks):
     logger.info("开始获取 Input Embedding 梯度...")
+
+    # ================= 插入开始：激活 Liger Kernel =================
+    if model_args.enable_liger_kernel:
+        logger.info(f"检测到 enable_liger_kernel=True,正在为 attrib 阶段强制注入 Liger Kernel...")
+        try:
+            # 尝试 Qwen3
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+            apply_liger_kernel_to_qwen3()
+            logger.info("成功注入 Liger Kernel (Qwen3 模式)")
+                
+        except Exception as e:
+            logger.warning(f"Liger Kernel 注入失败: {e}")
+            logger.warning("将使用原生 PyTorch 算子继续运行。")
 
     # 基础组件加载
     tokenizer_module = load_tokenizer(model_args)
@@ -261,6 +78,11 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
     # 加载模型 
     model = load_model(tokenizer, model_args, finetuning_args)
     model.train()  # 确保模型在训练模式下
+
+    if training_args.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+            model.config.use_cache = False # 训练/梯度分析时必须关闭 KV Cache
+            logger.info("已手动开启 Gradient Checkpointing (节省显存模式)")
 
     # 大部分 HF 模型用 get_input_embeddings() 都能拿到这一层
     embedding_layer = model.get_input_embeddings()
@@ -290,6 +112,10 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
         batch_size=1,  # bs ==1,分析单个batchsize
         collate_fn=data_collator
     )
+    # 将梯度存储到本地磁盘，分析与获取分离
+    cache_dir = os.path.join(training_args.output_dir, "grad_caches")
+    os.makedirs(cache_dir, exist_ok=True)
+    logger.info(f"梯度缓存文件将保存至: {cache_dir}")
 
     for step, batch in enumerate(dataloader):
         # 将数据移到 GPU
@@ -346,71 +172,23 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
             # 只分析 response 部分的梯度结构
             grad_matrix = grad_matrix[response_start_idx:, :]  # 形状 [Resp_Len, Emb_Dim]
             logger.info(f"全长: {len(full_input_ids)}, Prompt长度: {response_start_idx}, Response长度: {grad_matrix.shape[0]}")
-            
-            U, S, V = torch.svd(grad_matrix)
-            singular_values = S.cpu().numpy() 
 
-            # 绘制图片
-            # 计算累积能量
-            energy = np.cumsum(singular_values ** 2) / np.sum(singular_values ** 2)
-            # 计算 Leverage Score ---
-            # 自动寻找 95% 能量的截断点 k
-            threshold = 0.95
-            k_indices = np.where(energy >= threshold)[0]
-            k = k_indices[0] + 1 if len(k_indices) > 0 else len(energy)
-            print(f"解释 {threshold*100}% 能量所需的秩 k = {k}")
-            # 只取前 k 个左奇异向量 (U_k)
-            U_k = U[:, :k]  # 形状 [Seq_Len, k]
-            # 计算每一行(Token)的 L2 范数平方 -> 在k维度中，根据投影来判断重要性分数
-            token_importance_scores = torch.norm(U_k, dim=1).pow(2).cpu().numpy()
-            full_scores = np.zeros(len(full_input_ids))
-            full_scores[response_start_idx:] = token_importance_scores
-            # ==========================================
-            # 组合绘图 (三图合一)
-            # ==========================================
-            plt.figure(figsize=(18, 5))
-            # 图 1: 奇异值分布 (The Cliff)
-            plt.subplot(1, 3, 1)
-            plt.plot(singular_values[:k], marker='o', markersize=3) # 只看前200个细节
-            plt.title(f"Top k Singular Values\n(Low Rank Structure)", fontsize=12)
-            plt.xlabel("Rank Index")
-            plt.ylabel("Singular Value")
-            plt.grid(True, alpha=0.3)
-            # 图 2: 能量累积 (Cumulative Energy)
-            plt.subplot(1, 3, 2)
-            plt.plot(energy[:k], color='orange', linewidth=2)
-            plt.axhline(y=threshold, color='r', linestyle='--', label=f'{threshold*100}% Energy')
-            plt.axvline(x=k, color='g', linestyle='--', label=f'Rank k={k}')
-            plt.title(f"Cumulative Energy Explained\n(k={k} captures {threshold*100}%)", fontsize=12)
-            plt.xlabel("Rank Index")
-            plt.ylabel("Ratio")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            # 图 3: Token 重要性分布 (Token-wise Leverage Scores)
-            # 这是你要找"废话"的关键图
-            plt.subplot(1, 3, 3)
-            plt.plot(token_importance_scores, color='purple', linewidth=1, alpha=0.8)
-            # 可以画个均值线参考
-            mean_score = np.mean(token_importance_scores)
-            plt.axhline(y=mean_score, color='black', linestyle=':', label='Avg Importance')
+            save_data = {
+                "step": step,
+                "input_ids": original_input_ids[0].cpu().tolist(),
+                "tokens": tokenizer.convert_ids_to_tokens(original_input_ids[0]), # 预先转好 Token 字符串方便后续使用
+                "gradients": grad_x.detach().squeeze(0).cpu(), # [Seq_Len, Hidden_Dim]
+                "response_start_idx": response_start_idx,
+                "loss": loss.item()
+            }
 
-            plt.title("Token Leverage Scores\n(High=Important, Low=Waste)", fontsize=12)
-            plt.xlabel("Token Position (Sequence)")
-            plt.ylabel("Importance Score (Leverage)")
-            plt.legend(loc='upper right')
-            plt.grid(True, alpha=0.3)
+            # 3. 写入文件
+            save_path = os.path.join(cache_dir, f"sample_{step}.pt")
+            torch.save(save_data, save_path)
+            logger.info(f"Step {step}: 梯度已保存至 {save_path}")
 
-            plt.tight_layout()
-            plt.savefig(f"leverage_scores_analysis_{step}sample.png")
-
-            ## 绘制report 
-            generate_full_report(full_input_ids, full_scores, tokenizer, step=step, save_dir="attribution_reports")
         else:
             logger.error("梯度依然为空！")
-
-        # 示例只跑第一个sample，看看效果
-        if step >= 0: 
-            break
 
     logger.info("梯度获取结束。")
 
