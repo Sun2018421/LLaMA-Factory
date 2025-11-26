@@ -125,11 +125,21 @@ def generate_segment_report(segment_data, prompt_text, sample_idx=0, save_dir="a
     
     # 按分数从高到低排序
     sorted_segs = sorted(indexed_segments, key=lambda x: x[1], reverse=True)
+    total_ranked = len(sorted_segs)
     
-    # 获取索引集合
+    # 获取 Top 10
     top_10_indices = set(x[0] for x in sorted_segs[:10])
-    # 注意：如果总数少于20个，bottom 可能会和 top 重叠，这里做个简单的集合差分
-    bottom_10_indices = set(x[0] for x in sorted_segs[-10:]) - top_10_indices
+    
+    # 计算后 10% / 20% / 30% 
+    # 先按升序（最不重要在前）排列
+    ascending_segs = list(reversed(sorted_segs))
+    thr_10 = max(1, int(np.ceil(total_ranked * 0.1))) if total_ranked else 0
+    thr_20 = max(thr_10, int(np.ceil(total_ranked * 0.2))) if total_ranked else 0
+    thr_30 = max(thr_20, int(np.ceil(total_ranked * 0.3))) if total_ranked else 0
+    
+    bottom_10_pct = set(x[0] for x in ascending_segs[:thr_10])
+    bottom_20_pct = set(x[0] for x in ascending_segs[thr_10:thr_20])
+    bottom_30_pct = set(x[0] for x in ascending_segs[thr_20:thr_30])
 
     # === 计算颜色范围 (用于中间部分的渐变) ===
     all_strengths = [s['strength'] for s in segment_data]
@@ -204,13 +214,24 @@ def generate_segment_report(segment_data, prompt_text, sample_idx=0, save_dir="a
             font_color = "#FFFFFF"
             css_class = "seg top-rank"
             tooltip = f"Rank: TOP 10 | Score: {strength:.4f}"
-            
-        elif i in bottom_10_indices:
-            # Bottom 10: 浅灰底，灰字
-            bg_color = "#E0E0E0" # 浅灰
-            font_color = "#888888" # 灰色字体
+        elif i in bottom_10_pct:
+            # 后 10%：最弱，深灰
+            bg_color = "#C0C0C0"
+            font_color = "#555555"
             css_class = "seg bottom-rank"
-            tooltip = f"Rank: BOTTOM 10 | Score: {strength:.4f}"
+            tooltip = f"Rank: Bottom 10% | Score: {strength:.4f}"
+        elif i in bottom_20_pct:
+            # 10%-20%：中灰
+            bg_color = "#D8D8D8"
+            font_color = "#666666"
+            css_class = "seg bottom-rank"
+            tooltip = f"Rank: Bottom 20% | Score: {strength:.4f}"
+        elif i in bottom_30_pct:
+            # 20%-30%：浅灰
+            bg_color = "#E8E8E8"
+            font_color = "#777777"
+            css_class = "seg bottom-rank"
+            tooltip = f"Rank: Bottom 30% | Score: {strength:.4f}"
             
         else:
             # 其他中间部分：使用原本的 Heatmap 逻辑 (淡红 -> 中红)
@@ -232,7 +253,9 @@ def generate_segment_report(segment_data, prompt_text, sample_idx=0, save_dir="a
         <div style="margin-top: 30px; font-size: 14px; color: #666; border-top: 1px solid #ddd; padding-top: 10px;">
             <strong>Legend:</strong> 
             <span style="background:#8B0000; color:white; padding:0 4px; font-weight:bold;">Deep Red</span> = Top 10 Important | 
-            <span style="background:#E0E0E0; color:#888; padding:0 4px; font-style:italic;">Gray</span> = Bottom 10 Unimportant | 
+            <span style="background:#C0C0C0; color:#555; padding:0 4px; font-style:italic;">Dark Gray</span> = Bottom 10% | 
+            <span style="background:#D8D8D8; color:#666; padding:0 4px; font-style:italic;">Mid Gray</span> = Bottom 20% | 
+            <span style="background:#E8E8E8; color:#777; padding:0 4px; font-style:italic;">Light Gray</span> = Bottom 30% | 
             <span style="color:red;">Light Red</span> = Intermediate
         </div>
     </body>
@@ -301,18 +324,37 @@ def analyze_single_file(file_path, output_root, seg_analyzer=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cache_dir", type=str, help="存放 .pt 文件的文件夹路径",default="saves/qwen3-4b/full/attr/grad_caches")
-    parser.add_argument("--output_dir", type=str, default="saves/qwen3-4b/full", help="分析结果输出路径")
+    parser.add_argument("--cache_dir", type=str, help="存放 .pt 文件的文件夹路径",default="saves/qwen3-4b/full/attr_temp1.0/grad_caches")
+    parser.add_argument("--output_dir", type=str, default="saves/qwen3-4b/full/attr_temp1.0", help="分析结果输出路径")
     parser.add_argument("--model_path", type=str, default='/mnt/zj-gpfs/home/whs/model/Qwen3-4B-Instruct-2507', help="模型路径，用于加载 Tokenizer")
+    parser.add_argument("--file_mode", type=str, choices=["all", "single"], default="all", help="选择处理全部梯度文件或单个文件")
+    parser.add_argument("--file_name", type=str, default=None, help="当选择单个文件时，指定 .pt 文件名或 step")
     args = parser.parse_args()
 
     if not os.path.exists(args.cache_dir):
         print(f"错误: 文件夹 {args.cache_dir} 不存在")
         exit()
 
-    # 获取所有 .pt 文件
-    files = [f for f in os.listdir(args.cache_dir) if f.endswith(".pt")]
-    files.sort(key=lambda x: int(x.split('_')[1].split('.')[0])) # 按 step 排序
+    # 获取要处理的 .pt 文件
+    if args.file_mode == "all":
+        files = [f for f in os.listdir(args.cache_dir) if f.endswith(".pt")]
+        files.sort(key=lambda x: int(x.split('_')[1].split('.')[0])) # 按 step 排序
+        if not files:
+            print("错误: 未找到任何 .pt 文件")
+            exit()
+    else:
+        if not args.file_name:
+            print("错误: file_mode=single 时必须提供 --file_name")
+            exit()
+        # 支持传入 step 编号或完整文件名
+        candidate = args.file_name
+        if not candidate.endswith(".pt"):
+            candidate = f"{candidate}.pt"
+        target_path = os.path.join(args.cache_dir, candidate)
+        if not os.path.exists(target_path):
+            print(f"错误: 文件 {target_path} 不存在")
+            exit()
+        files = [candidate]
 
     print(f"找到 {len(files)} 个梯度缓存文件，开始分析...")
 
