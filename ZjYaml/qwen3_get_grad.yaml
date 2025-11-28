@@ -11,12 +11,13 @@ finetuning_type: full
 ### dataset
 dataset: math_cot
 template: qwen
-cutoff_len: 32000
-max_samples: 1000
+cutoff_len: 18000
+# max_samples: 1000
+packing: false
 overwrite_cache: true
 preprocessing_num_workers: 16
 dataloader_num_workers: 4
-
+seed: 42
 ### output
 output_dir: saves/qwen3-4b/full/attr_temp1.0
 logging_steps: 10

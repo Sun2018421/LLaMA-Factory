@@ -33,6 +33,8 @@ from .processor import (
     UnsupervisedDatasetProcessor,
 )
 
+import torch 
+from ..extras.constants import IGNORE_INDEX
 
 if TYPE_CHECKING:
     from datasets import Dataset, IterableDataset
@@ -259,6 +261,34 @@ def _get_preprocessed_dataset(
         remove_columns=column_names,
         **kwargs,
     )
+
+    if data_args.attr_mask_dir is not None:
+        from pathlib import Path
+        mask_dir = Path(data_args.attr_mask_dir)
+        ignore_index = IGNORE_INDEX
+        print(f"正在从 {mask_dir} 注入归因 Mask...")
+        def apply_attr_mask(example, idx):
+            mask_file = mask_dir / f"sample_{idx}_mask.pt"
+            if not mask_file.exists():
+                return example
+            payload = torch.load(mask_file, map_location="cpu")
+            labels = example["labels"]
+            first_valid = next((i for i, v in enumerate(labels) if v != ignore_index), None)
+            resp_start = payload.get("response_start_idx", first_valid or 0)
+            if first_valid is not None:
+                assert first_valid == resp_start #  必须要一一对应，保证我生成mask的有效性
+            mask_tensor = payload["mask"].tolist()
+            ignore_value = payload.get("ignore_value", -100)
+            for rel, val in enumerate(mask_tensor):
+                if val == ignore_value:
+                    target = resp_start + rel
+                    assert  0 <= target < len(labels)
+                    labels[target] = ignore_index
+          
+            example["labels"] = labels
+            return example
+
+        dataset = dataset.map(apply_attr_mask, with_indices=True)
 
     if training_args.should_log:
         try:

@@ -27,6 +27,11 @@ class DataArguments:
         default=None,
         metadata={"help": "Which template to use for constructing prompts in training and inference."},
     )
+
+    attr_mask_dir: Optional[str] = field(
+       default=None,
+       metadata={"help": "指向 attribution 阶段生成的 sample_x_mask.pt 目录。"},
+    )
     dataset: Optional[str] = field(
         default=None,
         metadata={"help": "The name of dataset(s) to use for training. Use commas to separate multiple datasets."},

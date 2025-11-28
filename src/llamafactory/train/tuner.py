@@ -98,7 +98,8 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
     data_collator = SFTDataCollatorWith4DAttentionMask(
         template=template,
         model=model if not training_args.predict_with_generate else None,
-        pad_to_multiple_of=8 if training_args.do_train else None,  # for shift short attention
+        # pad_to_multiple_of=8 if training_args.do_train else None,  # for shift short attention
+        pad_to_multiple_of=None, # 避免多余padding
         label_pad_token_id=-100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id,
         block_diag_attn=model_args.block_diag_attn,
         attn_implementation=getattr(model.config, "_attn_implementation", None),
@@ -120,10 +121,8 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
     for step, batch in enumerate(dataloader):
         # 将数据移到 GPU
         batch = {k: v.to(model.device) for k, v in batch.items()}
-        
         # 清空梯度
         model.zero_grad()
-
         # 把 input_ids 单独拿出来，并从 batch 中移除
         if "input_ids" not in batch:
             raise ValueError("Batch 中未找到 'input_ids'，无法获取 Embedding 输入。")
@@ -131,52 +130,44 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
         # batch["input_ids"] 在 pop 之后就没了，所以要先存下来
         original_input_ids = batch["input_ids"].clone()
         input_ids = batch.pop("input_ids") 
-        
         # 手动通过 Embedding 层获取向量
         # 这一步只是查表，得到的是 Tensor
         inputs_embeds = embedding_layer(input_ids)
-        
         # .detach(): 我们不关心 Embedding 表本身的权重怎么变
         # .requires_grad_(True): 我们只关心这个“输入向量”本身怎么变
         inputs_embeds = inputs_embeds.detach()
         inputs_embeds.requires_grad_(True)
-        
         # 把处理好的 inputs_embeds 放回 batch
         batch["inputs_embeds"] = inputs_embeds
-        
         # 此时模型接收的是 embeddings，跳过了内部的 embedding_layer 查表过程
         outputs = model(**batch)
-        
         loss = outputs.loss 
-        
         # 反向传播
         loss.backward()
-
         # 直接获取梯度
         # 因为我们设置了 inputs_embeds.requires_grad_(True)，梯度会直接存要在 inputs_embeds.grad 里
         grad_x = inputs_embeds.grad
-        
         if grad_x is not None:
             logger.info(f"Step {step}: 成功获取梯度, Shape: {grad_x.shape}")
-            
             # === 分析算法 ===
             grad_matrix = grad_x.detach().squeeze(0).float() # 转换成float32，保证svd计算精度
             full_input_ids = original_input_ids[0]
             full_labels = batch["labels"][0]
             # 寻找response的起点
-
-            valid_label_indices = (full_labels !=-100).nonzero(as_tuple=True)[0]
+            # valid_label_indices 不仅能找到起点，也能找到终点
+            valid_label_indices = (full_labels != -100).nonzero(as_tuple=True)[0]
             if (len(valid_label_indices) ==0):
                 raise ValueError("当前样本未找到有效的 labels,无法定位 response 部分。")
             response_start_idx = valid_label_indices[0].item()
+            response_end_idx = valid_label_indices[-1].item() # 也要找到终点，避免padding的影响
             # 只分析 response 部分的梯度结构
-            grad_matrix = grad_matrix[response_start_idx:, :]  # 形状 [Resp_Len, Emb_Dim]
-            logger.info(f"全长: {len(full_input_ids)}, Prompt长度: {response_start_idx}, Response长度: {grad_matrix.shape[0]}")
-
+            grad_matrix = grad_matrix[response_start_idx:response_end_idx+1, :]  # 形状 [Resp_Len, Emb_Dim]
+            saved_input_ids = full_input_ids[response_start_idx:response_end_idx+1].cpu().tolist()
+            logger.info(f"Tensor全长: {len(full_input_ids)}, 有效开始点,{response_start_idx},有效结束点: {response_end_idx}, 最终Response长度: {grad_matrix.shape[0]}")
             save_data = {
                 "step": step,
-                "input_ids": original_input_ids[0].cpu().tolist(),
-                "tokens": tokenizer.convert_ids_to_tokens(original_input_ids[0]), # 预先转好 Token 字符串方便后续使用
+                "input_ids": full_input_ids,
+                "tokens": tokenizer.convert_ids_to_tokens(full_input_ids), # 预先转好 Token 字符串方便后续使用
                 "gradients": grad_x.detach().squeeze(0).cpu(), # [Seq_Len, Hidden_Dim]
                 "response_start_idx": response_start_idx,
                 "loss": loss.item()
@@ -186,7 +177,6 @@ def run_attribution(model_args, data_args, training_args, finetuning_args, callb
             save_path = os.path.join(cache_dir, f"sample_{step}.pt")
             torch.save(save_data, save_path)
             logger.info(f"Step {step}: 梯度已保存至 {save_path}")
-
         else:
             logger.error("梯度依然为空！")
 
